@@ -251,7 +251,7 @@ def draw_header_hud(frame):
     cv2.rectangle(overlay, (0, 0), (w, 100), COLOR_DARK, -1)
     cv2.addWeighted(overlay, 0.6, frame, 0.4, 0, frame)
     
-    cv2.putText(frame, ">> ATTENDANCE SYSTEM <<", (20, 35), 
+    cv2.putText(frame, ">> AEGIS ATTENDANCE SYSTEM <<", (20, 35), 
                 cv2.FONT_HERSHEY_SIMPLEX, 1.0, COLOR_GREEN, 2)
     
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -414,7 +414,7 @@ while True:
     draw_header_hud(frame)
     draw_footer_hud(frame, fps, len(tracked_faces))
 
-    cv2.imshow("Facial Recognition & Attendance System", frame)
+    cv2.imshow("AEGIS Facial Recognition & Attendance System", frame)
 
     key = cv2.waitKey(1) & 0xFF
     

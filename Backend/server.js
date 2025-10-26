@@ -1,15 +1,18 @@
 /**
- * Backend Server - Integrated Classroom Monitoring + Face Recognition Attendance
- * WITH ENHANCED CLASS & SECTION MANAGEMENT
+ * UNIFIED CLASSROOM MONITORING SYSTEM
  * 
- * Features:
+ * Combines:
  * - Encrypted log reception from student agents
- * - Face recognition database with class/section support
- * - Complete attendance tracking with filters
+ * - Face recognition with class/section management
+ * - Attendance tracking with filtering
+ * - Encrypted file upload/download (AES-256-GCM)
+ * - Activity logging and monitoring
+ * - Exam mode control
  * - Real-time WebSocket updates
  * - CSV export capabilities
  */
 
+require('dotenv').config();
 const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
@@ -17,13 +20,40 @@ const sqlite3 = require('sqlite3').verbose();
 const crypto = require('crypto');
 const cors = require('cors');
 const fernet = require('fernet');
+const multer = require('multer');
+const path = require('path');
+const fs = require('fs');
 
-// Configuration
-const PORT = 8080;
-const MASTER_PASSWORD = 'password123';
-const SALT = 'bal_bharati_salt';
+// ============================================
+// CONFIGURATION
+// ============================================
+const PORT = process.env.PORT || 8080;
+const MASTER_PASSWORD = process.env.MASTER_PASSWORD || 'password123';
+const SALT = process.env.SALT || 'bal_bharati_salt';
+const DB_PATH = process.env.DB_PATH || './classroom_monitoring.db';
+const LOGS_DIR = path.join(__dirname, 'logs');
 
-// Initialize Express and Socket.IO
+// AES Configuration for file encryption
+const AES_KEY_BASE64 = process.env.AES_KEY_BASE64;
+let AES_KEY = null;
+if (AES_KEY_BASE64) {
+    AES_KEY = Buffer.from(AES_KEY_BASE64, 'base64');
+    if (AES_KEY.length !== 32) {
+        console.error('⚠️  AES_KEY must be 32 bytes (base64 encoded)');
+        AES_KEY = null;
+    }
+} else {
+    console.log('ℹ️  AES_KEY_BASE64 not set - file encryption disabled');
+}
+
+// Ensure logs directory exists
+if (!fs.existsSync(LOGS_DIR)) {
+    fs.mkdirSync(LOGS_DIR, { recursive: true });
+}
+
+// ============================================
+// INITIALIZE EXPRESS AND SOCKET.IO
+// ============================================
 const app = express();
 const server = http.createServer(app);
 const io = new Server(server, {
@@ -36,133 +66,134 @@ const io = new Server(server, {
 app.use(cors());
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
+app.use(express.static(path.join(__dirname, 'public')));
 
-// Initialize SQLite Database
-const db = new sqlite3.Database('./classroom_monitoring.db', (err) => {
+// ============================================
+// INITIALIZE SQLITE DATABASE
+// ============================================
+const db = new sqlite3.Database(DB_PATH, (err) => {
     if (err) {
-        console.error('[-] Database connection error:', err);
+        console.error('❌ Database connection error:', err);
     } else {
-        console.log('[+] Connected to SQLite database');
+        console.log('✅ Connected to SQLite database');
         initializeDatabase();
     }
 });
 
 /**
- * Create database tables with full class/section support
+ * Create all database tables
  */
 function initializeDatabase() {
-    // Classroom Monitoring Tables
-    db.run(`
-        CREATE TABLE IF NOT EXISTS logs (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            device_identifier TEXT NOT NULL,
-            computer_name TEXT NOT NULL,
-            username TEXT NOT NULL,
-            mac_address TEXT,
-            session_id TEXT NOT NULL,
-            timestamp DATETIME NOT NULL,
-            event_type TEXT NOT NULL,
-            encrypted_data TEXT NOT NULL,
-            severity TEXT NOT NULL,
-            device_type TEXT,
-            class_section TEXT,
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-        )
-    `, (err) => {
-        if (err) console.error('[-] Error creating logs table:', err);
-        else console.log('[+] Logs table ready');
-    });
+    db.serialize(() => {
+        // Classroom Monitoring Logs
+        db.run(`
+            CREATE TABLE IF NOT EXISTS logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                device_identifier TEXT NOT NULL,
+                computer_name TEXT NOT NULL,
+                username TEXT NOT NULL,
+                mac_address TEXT,
+                session_id TEXT NOT NULL,
+                timestamp DATETIME NOT NULL,
+                event_type TEXT NOT NULL,
+                encrypted_data TEXT NOT NULL,
+                severity TEXT NOT NULL,
+                device_type TEXT,
+                class_section TEXT,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        `);
 
-    db.run(`
-        CREATE TABLE IF NOT EXISTS active_devices (
-            device_identifier TEXT PRIMARY KEY,
-            computer_name TEXT NOT NULL,
-            username TEXT NOT NULL,
-            device_type TEXT,
-            class_section TEXT,
-            last_seen DATETIME NOT NULL,
-            status TEXT DEFAULT 'ACTIVE'
-        )
-    `, (err) => {
-        if (err) console.error('[-] Error creating active_devices table:', err);
-        else console.log('[+] Active devices table ready');
-    });
+        // Active Devices Tracking
+        db.run(`
+            CREATE TABLE IF NOT EXISTS active_devices (
+                device_identifier TEXT PRIMARY KEY,
+                computer_name TEXT NOT NULL,
+                username TEXT NOT NULL,
+                device_type TEXT,
+                class_section TEXT,
+                last_seen DATETIME NOT NULL,
+                status TEXT DEFAULT 'ACTIVE'
+            )
+        `);
 
-    db.run(`
-        CREATE TABLE IF NOT EXISTS alerts (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            device_identifier TEXT NOT NULL,
-            computer_name TEXT NOT NULL,
-            alert_type TEXT NOT NULL,
-            message TEXT NOT NULL,
-            severity TEXT NOT NULL,
-            timestamp DATETIME NOT NULL,
-            acknowledged INTEGER DEFAULT 0,
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-        )
-    `, (err) => {
-        if (err) console.error('[-] Error creating alerts table:', err);
-        else console.log('[+] Alerts table ready');
-    });
+        // Alerts/Warnings
+        db.run(`
+            CREATE TABLE IF NOT EXISTS alerts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                device_identifier TEXT NOT NULL,
+                computer_name TEXT NOT NULL,
+                alert_type TEXT NOT NULL,
+                message TEXT NOT NULL,
+                severity TEXT NOT NULL,
+                timestamp DATETIME NOT NULL,
+                acknowledged INTEGER DEFAULT 0,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        `);
 
-    // Enhanced People Table with Class/Section
-    db.run(`
-        CREATE TABLE IF NOT EXISTS people (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT UNIQUE NOT NULL,
-            class TEXT,
-            section TEXT,
-            roll_number TEXT,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    `, (err) => {
-        if (err) console.error('[-] Error creating people table:', err);
-        else console.log('[+] People table ready');
-    });
+        // People Registry (Students/Staff)
+        db.run(`
+            CREATE TABLE IF NOT EXISTS people (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT UNIQUE NOT NULL,
+                class TEXT,
+                section TEXT,
+                roll_number TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        `);
 
-    db.run(`
-        CREATE TABLE IF NOT EXISTS face_images (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            person_id INTEGER,
-            image_data BLOB NOT NULL,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (person_id) REFERENCES people(id) ON DELETE CASCADE
-        )
-    `, (err) => {
-        if (err) console.error('[-] Error creating face_images table:', err);
-        else console.log('[+] Face images table ready');
-    });
+        // Face Images for Recognition
+        db.run(`
+            CREATE TABLE IF NOT EXISTS face_images (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                person_id INTEGER,
+                image_data BLOB NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (person_id) REFERENCES people(id) ON DELETE CASCADE
+            )
+        `);
 
-    // Enhanced Attendance Table with Class/Section
-    db.run(`
-        CREATE TABLE IF NOT EXISTS attendance (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            person_name TEXT NOT NULL,
-            class TEXT,
-            section TEXT,
-            roll_number TEXT,
-            date TEXT NOT NULL,
-            time TEXT NOT NULL,
-            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-            camera_location TEXT DEFAULT 'Main Entrance',
-            UNIQUE(person_name, date)
-        )
-    `, (err) => {
-        if (err) console.error('[-] Error creating attendance table:', err);
-        else console.log('[+] Attendance table ready');
-    });
+        // Attendance Records
+        db.run(`
+            CREATE TABLE IF NOT EXISTS attendance (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                person_name TEXT NOT NULL,
+                class TEXT,
+                section TEXT,
+                roll_number TEXT,
+                date TEXT NOT NULL,
+                time TEXT NOT NULL,
+                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+                camera_location TEXT DEFAULT 'Main Entrance',
+                UNIQUE(person_name, date)
+            )
+        `);
 
-    // Add columns to existing tables if they don't exist (for migration)
-    db.run(`ALTER TABLE people ADD COLUMN class TEXT`, () => {});
-    db.run(`ALTER TABLE people ADD COLUMN section TEXT`, () => {});
-    db.run(`ALTER TABLE people ADD COLUMN roll_number TEXT`, () => {});
-    db.run(`ALTER TABLE attendance ADD COLUMN class TEXT`, () => {});
-    db.run(`ALTER TABLE attendance ADD COLUMN section TEXT`, () => {});
-    db.run(`ALTER TABLE attendance ADD COLUMN roll_number TEXT`, () => {});
+        // Encrypted Files Storage
+        db.run(`
+            CREATE TABLE IF NOT EXISTS files (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                filename TEXT NOT NULL,
+                mimetype TEXT,
+                data BLOB NOT NULL,
+                iv TEXT NOT NULL,
+                auth_tag TEXT NOT NULL,
+                uploaded_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        `);
+
+        console.log('✅ All database tables initialized');
+    });
 }
 
+// ============================================
+// ENCRYPTION UTILITIES
+// ============================================
+
 /**
- * Derive encryption key from master password
+ * Derive Fernet encryption key from master password
  */
 function deriveEncryptionKey() {
     const iterations = 100000;
@@ -194,10 +225,14 @@ function decryptLog(encryptedData) {
         const decrypted = token.decode();
         return JSON.parse(decrypted);
     } catch (error) {
-        console.error('[-] Decryption error:', error.message);
+        console.error('❌ Decryption error:', error.message);
         return null;
     }
 }
+
+// ============================================
+// LOGGING FUNCTIONS
+// ============================================
 
 function storeEncryptedLog(message) {
     db.run(`
@@ -292,14 +327,23 @@ function createAlert(device_identifier, computer_name, alert_type, details, seve
     });
 }
 
-/**
- * WebSocket connection handler
- */
+// ============================================
+// WEBSOCKET CONNECTION HANDLER
+// ============================================
+
+let activityLogs = [];
+let exam_active = false;
+
 io.on('connection', (socket) => {
-    console.log('[+] New connection:', socket.id);
+    console.log('✅ New connection:', socket.id);
     
     socket.deviceInfo = null;
 
+    // Send initial state to dashboard
+    socket.emit('exam_mode_changed', { exam_active });
+    socket.emit('initial_activity_logs', activityLogs);
+
+    // Handle encrypted log messages from student agents
     socket.on('message', (data) => {
         try {
             const message = JSON.parse(data);
@@ -330,22 +374,20 @@ io.on('connection', (socket) => {
                 }
             }
         } catch (error) {
-            console.error('[-] Error processing message:', error);
+            console.error('❌ Error processing message:', error);
         }
     });
 
     socket.on('disconnect', () => {
         if (socket.deviceInfo) {
-            console.log(`[-] Device disconnected: ${socket.deviceInfo.computer_name}`);
+            console.log(`❌ Device disconnected: ${socket.deviceInfo.computer_name}`);
         }
     });
 });
 
-/**
- * ============================================
- * CLASSROOM MONITORING API ENDPOINTS
- * ============================================
- */
+// ============================================
+// CLASSROOM MONITORING API ENDPOINTS
+// ============================================
 
 app.get('/api/devices', (req, res) => {
     db.all(`
@@ -399,11 +441,7 @@ app.get('/api/alerts', (req, res) => {
 app.post('/api/alerts/:id/acknowledge', (req, res) => {
     const { id } = req.params;
 
-    db.run(`
-        UPDATE alerts 
-        SET acknowledged = 1
-        WHERE id = ?
-    `, [id], (err) => {
+    db.run(`UPDATE alerts SET acknowledged = 1 WHERE id = ?`, [id], (err) => {
         if (err) {
             res.status(500).json({ error: err.message });
         } else {
@@ -430,12 +468,76 @@ app.get('/api/stats', (req, res) => {
     });
 });
 
-/**
- * ============================================
- * FACE RECOGNITION API ENDPOINTS
- * WITH CLASS/SECTION SUPPORT
- * ============================================
- */
+// ============================================
+// ACTIVITY LOGGING ENDPOINTS
+// ============================================
+
+app.post('/log', (req, res) => {
+    try {
+        const log = req.body;
+        if (!log || !log.event) return res.status(400).json({ error: 'Invalid log format' });
+        
+        const ts = new Date(log.timestamp || Date.now()).toISOString();
+        const line = `${ts} | ${log.event} | ${JSON.stringify(log.details)}\n`;
+        
+        fs.appendFile(path.join(LOGS_DIR, 'activity_logs.txt'), line, (err) => {
+            if (err) console.error('Failed to save log', err);
+        });
+        
+        io.emit('new_log', { timestamp: ts, event: log.event, details: log.details });
+        res.json({ status: 'ok' });
+    } catch (err) {
+        console.error('Log error', err);
+        res.status(500).json({ error: 'Internal error' });
+    }
+});
+
+app.post('/api/activity-log', (req, res) => {
+    try {
+        const log = req.body;
+        if (!log || !log.timestamp || !log.application || !log.window) {
+            return res.status(400).json({ error: 'Invalid log format' });
+        }
+        
+        activityLogs.push(log);
+        if (activityLogs.length > 500) activityLogs.shift();
+        
+        io.emit('new_activity', log);
+        res.json({ status: 'ok' });
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: 'Internal error' });
+    }
+});
+
+app.get('/api/activity-log', (req, res) => res.json(activityLogs));
+
+// ============================================
+// EXAM MODE CONTROL
+// ============================================
+
+app.post('/api/exam-mode', (req, res) => {
+    try {
+        const { exam_active: newMode } = req.body;
+        if (typeof newMode !== "boolean") {
+            return res.status(400).json({ error: "Invalid exam_active value" });
+        }
+        
+        exam_active = newMode;
+        io.emit('exam_mode_changed', { exam_active });
+        console.log(`📝 Exam mode set to: ${exam_active}`);
+        res.json({ success: true });
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: 'Internal error' });
+    }
+});
+
+app.get('/api/exam-status', (req, res) => res.json({ exam_active }));
+
+// ============================================
+// FACE RECOGNITION API ENDPOINTS
+// ============================================
 
 // Register person with class/section/roll number
 app.post('/api/face/register_person', (req, res) => {
@@ -451,7 +553,6 @@ app.post('/api/face/register_person', (req, res) => {
         }
         
         if (row) {
-            // Update existing person
             db.run(
                 'UPDATE people SET class = ?, section = ?, roll_number = ? WHERE id = ?',
                 [className, section, roll_number, row.id],
@@ -459,12 +560,11 @@ app.post('/api/face/register_person', (req, res) => {
                     if (updateErr) {
                         return res.status(500).json({ error: 'Failed to update person' });
                     }
-                    console.log(`[FACE] Updated: ${name} (${className}-${section}, Roll: ${roll_number})`);
+                    console.log(`👤 Updated: ${name} (${className}-${section}, Roll: ${roll_number})`);
                     return res.json({ person_id: row.id, success: true, message: 'Person updated' });
                 }
             );
         } else {
-            // Insert new person
             db.run(
                 'INSERT INTO people (name, class, section, roll_number) VALUES (?, ?, ?, ?)',
                 [name, className, section, roll_number],
@@ -472,7 +572,7 @@ app.post('/api/face/register_person', (req, res) => {
                     if (insertErr) {
                         return res.status(500).json({ error: 'Failed to register person' });
                     }
-                    console.log(`[FACE] Registered: ${name} (${className}-${section}, Roll: ${roll_number})`);
+                    console.log(`👤 Registered: ${name} (${className}-${section}, Roll: ${roll_number})`);
                     return res.status(201).json({ person_id: this.lastID, success: true });
                 }
             );
@@ -501,7 +601,6 @@ app.post('/api/face/add_image', (req, res) => {
     );
 });
 
-// Get people with images and class/section info
 app.get('/api/face/get_people_with_images', (req, res) => {
     db.all('SELECT id, name, class, section, roll_number FROM people ORDER BY class, section, name', [], (err, people) => {
         if (err) {
@@ -548,7 +647,6 @@ app.get('/api/face/get_people_with_images', (req, res) => {
     });
 });
 
-// Bulk upload dataset
 app.post('/api/face/upload_dataset', (req, res) => {
     const { people_data } = req.body;
     
@@ -561,7 +659,7 @@ app.post('/api/face/upload_dataset', (req, res) => {
     
     const processNextPerson = (index) => {
         if (index >= people_data.length) {
-            console.log(`[FACE] Dataset upload complete: ${totalPeople} people, ${totalImages} images`);
+            console.log(`📊 Dataset upload complete: ${totalPeople} people, ${totalImages} images`);
             return res.json({ 
                 success: true, 
                 people_count: totalPeople,
@@ -650,14 +748,10 @@ app.get('/api/face/get_people', (req, res) => {
     });
 });
 
-/**
- * ============================================
- * ATTENDANCE API ENDPOINTS
- * WITH CLASS/SECTION FILTERING
- * ============================================
- */
+// ============================================
+// ATTENDANCE API ENDPOINTS
+// ============================================
 
-// Mark attendance with class/section lookup
 app.post('/api/attendance/mark', (req, res) => {
     const { person_name, date, time, camera_location } = req.body;
 
@@ -665,7 +759,6 @@ app.post('/api/attendance/mark', (req, res) => {
         return res.status(400).json({ error: 'Missing required fields' });
     }
 
-    // Get person's class/section from people table
     db.get(
         'SELECT class, section, roll_number FROM people WHERE name = ?',
         [person_name],
@@ -687,7 +780,7 @@ app.post('/api/attendance/mark', (req, res) => {
                     return res.status(500).json({ error: err.message });
                 }
 
-                console.log(`[ATTENDANCE] ${person_name} (${className}-${section}) at ${time}`);
+                console.log(`✅ Attendance: ${person_name} (${className}-${section}) at ${time}`);
                 
                 io.emit('new_attendance', {
                     person_name,
@@ -709,7 +802,6 @@ app.post('/api/attendance/mark', (req, res) => {
     );
 });
 
-// Get today's attendance with optional filters
 app.get('/api/attendance/today', (req, res) => {
     const today = new Date().toISOString().split('T')[0];
     const { class: className, section } = req.query;
@@ -740,7 +832,6 @@ app.get('/api/attendance/today', (req, res) => {
     });
 });
 
-// Get attendance for specific date with filters
 app.get('/api/attendance/date/:date', (req, res) => {
     const { date } = req.params;
     const { class: className, section } = req.query;
@@ -767,7 +858,6 @@ app.get('/api/attendance/date/:date', (req, res) => {
     });
 });
 
-// Get attendance for date range with filters
 app.get('/api/attendance/range', (req, res) => {
     const { start_date, end_date, class: className, section } = req.query;
 
@@ -802,7 +892,6 @@ app.get('/api/attendance/range', (req, res) => {
     });
 });
 
-// Get attendance for specific person
 app.get('/api/attendance/person/:name', (req, res) => {
     const { name } = req.params;
     const { start_date, end_date } = req.query;
@@ -829,7 +918,6 @@ app.get('/api/attendance/person/:name', (req, res) => {
     });
 });
 
-// Get attendance summary with class/section breakdown
 app.get('/api/attendance/summary', (req, res) => {
     const { class: className, section } = req.query;
 
@@ -877,7 +965,6 @@ app.get('/api/attendance/summary', (req, res) => {
     });
 });
 
-// Export attendance as CSV with class/section
 app.get('/api/attendance/export/csv', (req, res) => {
     const { start_date, end_date, class: className, section } = req.query;
 
@@ -915,7 +1002,6 @@ app.get('/api/attendance/export/csv', (req, res) => {
     });
 });
 
-// Delete attendance record
 app.delete('/api/attendance/:id', (req, res) => {
     const { id } = req.params;
 
@@ -927,13 +1013,10 @@ app.delete('/api/attendance/:id', (req, res) => {
     });
 });
 
-/**
- * ============================================
- * CLASS & SECTION MANAGEMENT ENDPOINTS
- * ============================================
- */
+// ============================================
+// CLASS & SECTION MANAGEMENT ENDPOINTS
+// ============================================
 
-// Get all classes
 app.get('/api/classes/list', (req, res) => {
     db.all(
         'SELECT DISTINCT class FROM people WHERE class IS NOT NULL ORDER BY class',
@@ -948,7 +1031,6 @@ app.get('/api/classes/list', (req, res) => {
     );
 });
 
-// Get sections for a class
 app.get('/api/sections/list/:class', (req, res) => {
     const { class: className } = req.params;
     
@@ -965,7 +1047,6 @@ app.get('/api/sections/list/:class', (req, res) => {
     );
 });
 
-// Get people by class and section
 app.get('/api/people/list', (req, res) => {
     const { class: className, section } = req.query;
 
@@ -991,72 +1072,174 @@ app.get('/api/people/list', (req, res) => {
     });
 });
 
-// Health check endpoint
-app.get('/health', (req, res) => {
-    res.json({ status: 'ok', timestamp: new Date().toISOString() });
+// ============================================
+// FILE UPLOAD/DOWNLOAD ENDPOINTS (AES-256-GCM)
+// ============================================
+
+const upload = multer({ 
+    storage: multer.memoryStorage(), 
+    limits: { fileSize: 50 * 1024 * 1024 } // 50MB limit
 });
 
-// Serve static files (for dashboard)
-app.use(express.static('public'));
+app.get('/files', (req, res) => {
+    db.all('SELECT id, filename, mimetype, uploaded_at FROM files ORDER BY uploaded_at DESC', (err, rows) => {
+        if (err) return res.status(500).json({ error: 'DB error' });
+        res.json(rows);
+    });
+});
 
-/**
- * Start server
- */
+app.post('/upload', upload.single('file'), (req, res) => {
+    if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
+    
+    if (!AES_KEY) {
+        return res.status(500).json({ error: 'File encryption not configured' });
+    }
+    
+    try {
+        const iv = crypto.randomBytes(12);
+        const cipher = crypto.createCipheriv('aes-256-gcm', AES_KEY, iv);
+        const encrypted = Buffer.concat([cipher.update(req.file.buffer), cipher.final()]);
+        const authTag = cipher.getAuthTag();
+        
+        const stmt = db.prepare('INSERT INTO files (filename, mimetype, data, iv, auth_tag) VALUES (?, ?, ?, ?, ?)');
+        stmt.run(
+            req.file.originalname, 
+            req.file.mimetype || 'application/octet-stream', 
+            encrypted, 
+            iv.toString('base64'), 
+            authTag.toString('base64'), 
+            function(err) {
+                if (err) return res.status(500).json({ error: 'DB insert error' });
+                console.log(`📁 File uploaded: ${req.file.originalname}`);
+                res.json({ success: true, id: this.lastID });
+            }
+        );
+        stmt.finalize();
+    } catch (e) {
+        console.error(e);
+        res.status(500).json({ error: 'Encryption error' });
+    }
+});
+
+app.get('/download/:id', (req, res) => {
+    const id = Number(req.params.id);
+    
+    if (!AES_KEY) {
+        return res.status(500).send('File encryption not configured');
+    }
+    
+    db.get('SELECT filename, mimetype, data, iv, auth_tag FROM files WHERE id = ?', [id], (err, row) => {
+        if (err) return res.status(500).send('DB error');
+        if (!row) return res.status(404).send('Not found');
+        
+        try {
+            const iv = Buffer.from(row.iv, 'base64');
+            const authTag = Buffer.from(row.auth_tag, 'base64');
+            const decipher = crypto.createDecipheriv('aes-256-gcm', AES_KEY, iv);
+            decipher.setAuthTag(authTag);
+            const decrypted = Buffer.concat([decipher.update(row.data), decipher.final()]);
+            
+            res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(row.filename)}"`);
+            res.setHeader('Content-Type', row.mimetype || 'application/octet-stream');
+            res.send(decrypted);
+        } catch (e) {
+            console.error('Decryption error', e);
+            res.status(500).send('Decryption failed');
+        }
+    });
+});
+
+// ============================================
+// HEALTH CHECK
+// ============================================
+
+app.get('/health', (req, res) => {
+    res.json({ 
+        status: 'ok', 
+        timestamp: new Date().toISOString(),
+        exam_mode: exam_active,
+        file_encryption: AES_KEY ? 'enabled' : 'disabled'
+    });
+});
+
+// ============================================
+// START SERVER
+// ============================================
+
 server.listen(PORT, '0.0.0.0', () => {
     console.log(`
-╔══════════════════════════════════════════════════════════════╗
-║  INTEGRATED CLASSROOM MONITORING + ATTENDANCE SYSTEM         ║
-║  WITH ENHANCED CLASS & SECTION MANAGEMENT                    ║
-╠══════════════════════════════════════════════════════════════╣
-║  Server: http://0.0.0.0:${PORT}                                 ║
-║  WebSocket: ws://0.0.0.0:${PORT}                                ║
-╠══════════════════════════════════════════════════════════════╣
-║  CLASSROOM MONITORING APIs:                                  ║
-║  - GET  /api/devices                                         ║
-║  - GET  /api/logs/:device_identifier                         ║
-║  - GET  /api/alerts                                          ║
-║  - POST /api/alerts/:id/acknowledge                          ║
-║  - GET  /api/stats                                           ║
-║                                                              ║
-║  FACE RECOGNITION APIs (with Class/Section):                 ║
-║  - POST /api/face/register_person                            ║
-║  - POST /api/face/add_image                                  ║
-║  - GET  /api/face/get_people_with_images                     ║
-║  - POST /api/face/upload_dataset                             ║
-║  - GET  /api/face/get_people                                 ║
-║                                                              ║
-║  ATTENDANCE APIs (with Class/Section Filtering):             ║
-║  - POST /api/attendance/mark                                 ║
-║  - GET  /api/attendance/today?class=X&section=Y              ║
-║  - GET  /api/attendance/date/:date?class=X&section=Y         ║
-║  - GET  /api/attendance/range?start_date&end_date&class...   ║
-║  - GET  /api/attendance/person/:name                         ║
-║  - GET  /api/attendance/summary?class=X&section=Y            ║
-║  - GET  /api/attendance/export/csv?class=X&section=Y         ║
-║  - DELETE /api/attendance/:id                                ║
-║                                                              ║
-║  CLASS/SECTION MANAGEMENT APIs:                              ║
-║  - GET  /api/classes/list                                    ║
-║  - GET  /api/sections/list/:class                            ║
-║  - GET  /api/people/list?class=X&section=Y                   ║
-║                                                              ║
-║  Dashboard: http://localhost:${PORT}                            ║
-╚══════════════════════════════════════════════════════════════╝
+╔═══════════════════════════════════════════════════════════════╗
+║  UNIFIED CLASSROOM MONITORING & ATTENDANCE SYSTEM             ║
+║  Complete Integration with All Features                       ║
+╠═══════════════════════════════════════════════════════════════╣
+║  Server: http://0.0.0.0:${PORT}                                   ║
+║  WebSocket: ws://0.0.0.0:${PORT}                                  ║
+╠═══════════════════════════════════════════════════════════════╣
+║  📡 CLASSROOM MONITORING APIs:                                ║
+║  - GET  /api/devices                                          ║
+║  - GET  /api/logs/:device_identifier                          ║
+║  - GET  /api/alerts                                           ║
+║  - POST /api/alerts/:id/acknowledge                           ║
+║  - GET  /api/stats                                            ║
+║                                                               ║
+║  👤 FACE RECOGNITION APIs:                                    ║
+║  - POST /api/face/register_person                             ║
+║  - POST /api/face/add_image                                   ║
+║  - GET  /api/face/get_people_with_images                      ║
+║  - POST /api/face/upload_dataset                              ║
+║  - GET  /api/face/get_people                                  ║
+║                                                               ║
+║  ✅ ATTENDANCE APIs:                                          ║
+║  - POST /api/attendance/mark                                  ║
+║  - GET  /api/attendance/today?class=X&section=Y               ║
+║  - GET  /api/attendance/date/:date?class=X&section=Y          ║
+║  - GET  /api/attendance/range?start_date&end_date&class...    ║
+║  - GET  /api/attendance/person/:name                          ║
+║  - GET  /api/attendance/summary?class=X&section=Y             ║
+║  - GET  /api/attendance/export/csv?class=X&section=Y          ║
+║  - DELETE /api/attendance/:id                                 ║
+║                                                               ║
+║  🏫 CLASS/SECTION MANAGEMENT:                                 ║
+║  - GET  /api/classes/list                                     ║
+║  - GET  /api/sections/list/:class                             ║
+║  - GET  /api/people/list?class=X&section=Y                    ║
+║                                                               ║
+║  📁 FILE MANAGEMENT (AES-256-GCM):                            ║
+║  - GET  /files                                                ║
+║  - POST /upload                                               ║
+║  - GET  /download/:id                                         ║
+║                                                               ║
+║  📝 ACTIVITY LOGGING:                                         ║
+║  - POST /log                                                  ║
+║  - POST /api/activity-log                                     ║
+║  - GET  /api/activity-log                                     ║
+║                                                               ║
+║  🎓 EXAM MODE:                                                ║
+║  - POST /api/exam-mode                                        ║
+║  - GET  /api/exam-status                                      ║
+║                                                               ║
+║  Dashboard: http://localhost:${PORT}                              ║
+╚═══════════════════════════════════════════════════════════════╝
     `);
-    console.log('[+] Ready to receive logs from student agents');
-    console.log('[+] Face recognition system active');
-    console.log('[+] Attendance tracking enabled');
-    console.log('[+] Class/Section filtering enabled');
+    console.log('✅ Classroom monitoring active');
+    console.log('✅ Face recognition system active');
+    console.log('✅ Attendance tracking enabled');
+    console.log('✅ Activity logging enabled');
+    console.log(`${AES_KEY ? '✅' : '⚠️ '} File encryption ${AES_KEY ? 'enabled' : 'disabled (set AES_KEY_BASE64 in .env)'}`);
+    console.log(`📝 Exam mode: ${exam_active ? 'ACTIVE' : 'INACTIVE'}`);
 });
 
-// Graceful shutdown
+// ============================================
+// GRACEFUL SHUTDOWN
+// ============================================
+
 process.on('SIGINT', () => {
-    console.log('\n[-] Shutting down server...');
+    console.log('\n⚠️  Shutting down server...');
     db.close((err) => {
         if (err) {
-            console.error('[-] Error closing database:', err);
+            console.error('❌ Error closing database:', err);
         } else {
-            console.log('[+] Database closed');
+            console.log('✅ Database closed');
         }
         process.exit(0);
     });
