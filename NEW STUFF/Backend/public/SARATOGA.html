@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Teacher Dashboard | Secure File Store</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <header class="main-header">
+    <h1>Teacher Dashboard</h1>
+    <p>Secure File Storage • AI Monitoring • Activity Logging • Exam Control</p>
+  </header>
+
+  <main class="dashboard">
+    <!-- Left Column: File Management + Exam Controls -->
+    <div class="left-column">
+      <section class="card file-section">
+        <h2>File Management</h2>
+        <div class="file-group">
+          <div class="upload-box">
+            <h3>Upload Files</h3>
+            <form id="uploadForm">
+              <input type="file" id="fileInput" name="file" required />
+              <button type="submit" class="btn-primary">Upload & Encrypt</button>
+            </form>
+            <div id="uploadResult" class="output-box"></div>
+          </div>
+
+          <div class="stored-box">
+            <h3>Stored Files</h3>
+            <div id="filesList" class="output-box">Loading...</div>
+          </div>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>Exam Controls</h2>
+        <div class="button-group">
+          <button id="startExam" class="btn-secondary">Start Exam</button>
+          <button id="stopExam" class="btn-secondary">Stop Exam</button>
+          <button id="terminate" class="btn-danger">Terminate Program</button>
+        </div>
+      </section>
+    </div>
+
+    <!-- Right Column: AI Monitoring and Activity Logs -->
+    <div class="right-column">
+      <section class="card large">
+        <h2>AI Monitoring System</h2>
+        <p id="status" class="status-text">Waiting for CCTV logs...</p>
+        <ul id="logs" class="log-list"></ul>
+      </section>
+
+      <section class="card large">
+        <h2>Activity Logger</h2>
+        <p id="activityStatus" class="status-text">Waiting for activity logs...</p>
+        <ul id="activityLogs" class="log-list">
+          <li>No logs yet</li>
+        </ul>
+      </section>
+    </div>
+  </main>
+
+  <footer class="footer">
+    <p>© 2025 Secure File Store | Developed for Academic Monitoring</p>
+  </footer>
+
+  <script src="/socket.io/socket.io.js"></script>
+  <script src="app.js"></script>
+
+  <script>
+    // Exam Controls
+    document.getElementById('startExam').onclick = () => {
+      fetch('/api/exam-mode', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ examMode: true })
+      });
+    };
+
+    document.getElementById('stopExam').onclick = () => {
+      fetch('/api/exam-mode', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ examMode: false })
+      });
+    };
+
+    document.getElementById('terminate').onclick = () => {
+      fetch('/api/terminate', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ terminate: true })
+      });
+    };
+  </script>
+</body>
+</html>
